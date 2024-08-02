@@ -10,15 +10,10 @@ let package = Package(
         .library(
             name: "LLM",
             targets: ["MLXLLM"]),
-        .library(
-            name: "MNIST",
-            targets: ["MLXMNIST"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.16.0"),
-        .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.9"),
-        .package(url: "https://github.com/1024jp/GzipSwift", "6.0.1" ... "6.0.1"),
-        .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
+      .package(url: "https://github.com/ml-explore/mlx-swift", .branch("main")),
+        .package(url: "https://github.com/huggingface/swift-transformers", .branch("main")),
     ],
     targets: [
         .target(
@@ -35,23 +30,6 @@ let package = Package(
             exclude: [
                 "README.md",
                 "LLM.h",
-            ]
-        ),
-        .target(
-            name: "MLXMNIST",
-            dependencies: [
-                .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXFast", package: "mlx-swift"),
-                .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "MLXOptimizers", package: "mlx-swift"),
-                .product(name: "MLXRandom", package: "mlx-swift"),
-                .product(name: "Transformers", package: "swift-transformers"),
-                .product(name: "Gzip", package: "GzipSwift"),
-            ],
-            path: "Libraries/MNIST",
-            exclude: [
-                "README.md",
-                "MNIST.h",
             ]
         ),
     ]
