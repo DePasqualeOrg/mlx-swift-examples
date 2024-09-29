@@ -130,7 +130,8 @@ extension ModelConfiguration {
 
     public static let mistral7B4bit = ModelConfiguration(
         id: "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
-        defaultPrompt: "Describe the Swift language."
+        defaultPrompt: "Describe the Swift language.",
+        extraEOSTokens: ["<|im_end|>"]  // !! This doesn't seem to work
     ) { prompt in
         "<s>[INST] \(prompt) [/INST] "
     }
