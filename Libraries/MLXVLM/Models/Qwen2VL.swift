@@ -686,9 +686,8 @@ public class Qwen2VLProcessor: UserInputProcessor {
         return (flattenedPatches, .init(gridT, gridH, gridW))
     }
 
-    public func prepare(prompt: UserInput.Prompt, imageTHW: [THW]?) -> String {
-        // the tokenizer does have a chat template and it expects messages
-        // like this:
+    public func prepare(prompt: UserInput.Prompt, imageTHW: [THW]?) throws -> [Int] {
+        // The tokenizer has a chat template and expects messages like this:
         //
         // [{'role': 'user', 'content': [{'type': 'text', 'text': 'What are these?'},
         //  {'type': 'image'}, {'type': 'image'}, {'type': 'image'}]}]
@@ -696,43 +695,51 @@ public class Qwen2VLProcessor: UserInputProcessor {
         // The output of the prompt template is fed into
         // image_processing_qwen2_vl.preprocess where it is further augmented
         // by replacing tokens according to imageTHW.
-        //
-        // Neither the structured content nor the postprocessing of the template
-        // are supported in current Tokenizer/Jinja (swift) so handle that here.
 
-        var messages = prompt.asMessages()
-        if messages[0]["role"] != "system" {
-            messages.insert(["role": "system", "content": "You are a helpful assistant."], at: 0)
-        }
-
-        let lastIndex = messages.count - 1
-        var lastMessage = messages[lastIndex]["content"] ?? ""
-
-        // image_processing_qwen2_vl.preprocess -- inject image_pad tokens for each image
-        let mergeLength = config.mergeSize * config.mergeSize
-        for thw in imageTHW ?? [] {
-            lastMessage += "<|vision_start|>"
-            lastMessage += Array(repeating: "<|image_pad|>", count: thw.product / mergeLength)
-                .joined()
-            lastMessage += "<|vision_end|>"
-        }
-
-        messages[lastIndex]["content"] = lastMessage
-
-        return
-            messages
-            .map {
-                "<|im_start|>\($0["role"] ?? "user")\n\($0["content"] ?? "")<|im_end|>"
+        var messages = {
+            switch prompt {
+            case .messages(let messages):
+                // TODO: Handle this case
+                // ...
+                var messages = messages
+                if messages[0]["role"] != "system" {
+                    messages.insert(
+                        ["role": "system", "content": "You are a helpful assistant."], at: 0)
+                }
+                return messages as [[String: Any]]
+            case .text(let text):
+                return [
+                    [
+                        "role": "user",
+                        "content": [
+                            [
+                                "type": "text",
+                                "text": text,
+                            ],
+                            [
+                                "type": "image",
+                                "image": "base64_encoded_image_data",  // TODO: Image data goes here?
+                            ],
+                        ],
+                    ]
+                ] as [[String: Any]]
             }
-            .joined(separator: "\n")
-            + "\n<|im_start|>assistant\n"
+        }()
+
+        for thw in imageTHW ?? [] {
+            // TODO: Add images to messages
+            // ...
+        }
+
+        print(messages)
+
+        return try tokenizer.applyChatTemplate(messages: messages)
     }
 
     public func prepare(input: UserInput) throws -> LMInput {
         if input.images.isEmpty {
             // just a straight text prompt
-            let prompt = prepare(prompt: input.prompt, imageTHW: nil)
-            let promptTokens = try tokenizer.encode(text: prompt)
+            let promptTokens = try prepare(prompt: input.prompt, imageTHW: nil)
             return LMInput(tokens: MLXArray(promptTokens))
         }
 
@@ -744,8 +751,7 @@ public class Qwen2VLProcessor: UserInputProcessor {
         let image = LMInput.ProcessedImage(pixels: pixels, imageGridThw: images.map { $0.1 })
 
         // processing_qwen2_vl.Qwen2VLProcessor
-        let prompt = prepare(prompt: input.prompt, imageTHW: image.imageGridThw)
-        let promptTokens = try tokenizer.encode(text: prompt)
+        let promptTokens = try prepare(prompt: input.prompt, imageTHW: image.imageGridThw)
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
 
