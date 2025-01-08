@@ -170,6 +170,11 @@ public class ModelRegistry: @unchecked Sendable {
         defaultPrompt: "What is the difference between a fruit and a vegetable?"
     )
 
+    static public let phi4_4bit = ModelConfiguration(
+        id: "mlx-community/phi-4-4bit",
+        defaultPrompt: "What is the difference between a fruit and a vegetable?"
+    )
+
     private static func all() -> [ModelConfiguration] {
         [
             codeLlama13b4bit,
@@ -188,6 +193,7 @@ public class ModelRegistry: @unchecked Sendable {
             phi4bit,
             qwen205b4bit,
             smolLM_135M_4bit,
+            phi4_4bit,
         ]
     }
 
@@ -224,6 +230,11 @@ private struct LLMUserInputProcessor: UserInputProcessor {
         do {
             let messages = input.prompt.asMessages()
             let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+
+            let tokensDecoded = try tokenizer.decode(tokens: promptTokens)
+            print("::: Prompt tokens decoded:")
+            print(tokensDecoded)
+
             return LMInput(tokens: MLXArray(promptTokens))
         } catch {
             // #150 -- it might be a TokenizerError.chatTemplate("No chat template was specified")

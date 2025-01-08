@@ -160,7 +160,7 @@ class LLMEvaluator {
 
     /// This controls which model loads. `phi3_5_4bit` is one of the smaller ones, so this will fit on
     /// more devices.
-    let modelConfiguration = ModelRegistry.phi3_5_4bit
+    let modelConfiguration = ModelRegistry.phi4_4bit
 
     /// parameters controlling the output
     let generateParameters = GenerateParameters(temperature: 0.6)
@@ -210,6 +210,7 @@ class LLMEvaluator {
     }
 
     func generate(prompt: String) async {
+        print("::: generate")
         guard !running else { return }
 
         running = true
