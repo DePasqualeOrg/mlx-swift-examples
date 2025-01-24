@@ -102,6 +102,11 @@ public class ModelRegistry: @unchecked Sendable {
         defaultPrompt: "Why is the sky blue?"
     )
 
+    static public let deepSeekR1_7B_4bit = ModelConfiguration(
+        id: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit",
+        defaultPrompt: "Describe the Swift programming language."
+    )
+
     static public let phi3_5_4bit = ModelConfiguration(
         id: "mlx-community/Phi-3.5-mini-instruct-4bit",
         defaultPrompt: "What is the gravity on Mars and the moon?",
@@ -224,6 +229,9 @@ private struct LLMUserInputProcessor: UserInputProcessor {
         do {
             let messages = input.prompt.asMessages()
             let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+            print(promptTokens)
+            // promptTokens matches the encoded target from the test: [151646, 151644, 74785, 279, 23670, 15473, 4128, 13, 151645]
+            // let promptTokensDecoded = try tokenizer.decode(tokens: promptTokens) // This causes a crash
             return LMInput(tokens: MLXArray(promptTokens))
         } catch {
             // #150 -- it might be a TokenizerError.chatTemplate("No chat template was specified")
