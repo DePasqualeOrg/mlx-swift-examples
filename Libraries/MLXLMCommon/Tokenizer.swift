@@ -61,9 +61,9 @@ public func loadTokenizerConfig(configuration: ModelConfiguration, hub: HubApi) 
 private func updateTokenizerConfig(_ tokenizerConfig: Config) -> Config {
     // workaround: replacement tokenizers for unhandled values in swift-transform
     if let tokenizerClass = tokenizerConfig.tokenizerClass?.stringValue,
-        let replacement = replacementTokenizers[tokenizerClass]
+        let replacement = replacementTokenizers[tokenizerClass] // Error: Cannot convert value of type 'Config' to expected argument type 'String'
     {
-        var dictionary = tokenizerConfig.dictionary
+        var dictionary = tokenizerConfig.dictionary // Error: Ambiguous use of 'dictionary'
         dictionary["tokenizer_class"] = replacement
         return Config(dictionary)
     }
