@@ -22,30 +22,56 @@ public struct QwenVL {
     }
 
     static func mergeInputIdsWithImageFeatures(
-        inputIds: MLXArray, inputEmbeds: MLXArray, imageFeatures: MLXArray,
-        imageTokenId: Int, videoTokenId: Int
+        inputIds: MLXArray,
+        inputEmbeds: MLXArray,
+        imageFeatures: MLXArray,
+        imageTokenId: Int,
+        videoTokenId: Int
     ) -> MLXArray {
-        var imageIndices = [Int]()
-        for (i, v) in inputIds.asArray(Int.self).enumerated() {
-            if v == imageTokenId || v == videoTokenId {
-                imageIndices.append(i)
+        // Find positions of image/video tokens
+        let imagePositions = (inputIds .== imageTokenId) .|| (inputIds .== videoTokenId)
+
+        let batchSize = inputIds.dim(0)
+        let seqLen = inputIds.dim(1)
+
+        // Process each batch item
+        var batchOutputs = [MLXArray]()
+        var featureStartIdx = 0
+
+        for batchIdx in 0 ..< batchSize {
+            let batchImagePositions = imagePositions[batchIdx]
+            let numImageTokens = sum(batchImagePositions).item(Int.self)
+
+            if numImageTokens > 0 {
+                // Get features for this batch (properly index the batch and feature dimensions)
+                let batchFeatures = imageFeatures[
+                    batchIdx, featureStartIdx ..< (featureStartIdx + numImageTokens)]
+
+                // Create cumulative sum for indexing
+                let cumsum = cumsum(batchImagePositions.asType(.int32))
+                let featureIndices = `where`(batchImagePositions, cumsum - 1, MLXArray(0))
+
+                // Gather features
+                let gatheredFeatures = batchFeatures[featureIndices]
+
+                // Combine with original embeddings
+                let imageMaskExpanded = expandedDimensions(batchImagePositions, axis: -1)
+                let batchOutput = `where`(
+                    imageMaskExpanded,
+                    gatheredFeatures,
+                    inputEmbeds[batchIdx]
+                )
+
+                batchOutputs.append(batchOutput)
+                featureStartIdx += numImageTokens
+            } else {
+                // No image tokens in this batch item
+                batchOutputs.append(inputEmbeds[batchIdx])
             }
         }
 
-        // Make sure shapes match before assignment
-        var result = inputEmbeds
-        if result.ndim == 2 {
-            result = result[.newAxis, 0..., 0...]
-        }
-
-        if imageFeatures.ndim == 2 {
-            let reshapedFeatures = imageFeatures[.newAxis, 0..., 0...]
-            result[0..., MLXArray(imageIndices), 0...] = reshapedFeatures
-        } else {
-            result[0..., MLXArray(imageIndices), 0...] = imageFeatures
-        }
-
-        return result
+        // Stack all batch outputs
+        return stacked(batchOutputs, axis: 0)
     }
 
     public class VisionRotaryEmbedding {
@@ -64,6 +90,48 @@ public struct QwenVL {
             let seq = MLXArray(0 ..< sequenceLength).asType(inverseFreq.dtype)
             let freqs = outer(seq, inverseFreq)
             return freqs
+        }
+    }
+
+    public class Qwen2RotaryEmbedding {
+        let dimensions: Int
+        let base: Float
+        var maxSeqLenCached: Int
+        let invFreq: MLXArray
+        var cosCached: MLXArray?
+        var sinCached: MLXArray?
+
+        init(dimensions: Int, maxPositionEmbeddings: Int = 2048, base: Float = 10000) {
+            self.dimensions = dimensions
+            self.base = base
+            self.maxSeqLenCached = maxPositionEmbeddings
+
+            // inv_freq = 1.0 / (base ** (arange(0, dim, 2) / dim))
+            let range = MLXArray(stride(from: 0, to: dimensions, by: 2)).asType(.float32)
+            self.invFreq = 1.0 / pow(base, range / Float(dimensions))
+
+            setCossinCache(seqLen: maxPositionEmbeddings)
+        }
+
+        private func setCossinCache(seqLen: Int) {
+            maxSeqLenCached = seqLen
+            let t = MLXArray(0 ..< seqLen).asType(.float32)
+
+            let freqs = outer(t, invFreq)
+            let emb = concatenated([freqs, freqs], axis: -1)
+            cosCached = cos(emb)
+            sinCached = sin(emb)
+        }
+
+        func callAsFunction(_ x: MLXArray, seqLen: Int) -> (MLXArray, MLXArray) {
+            if seqLen > maxSeqLenCached {
+                setCossinCache(seqLen: seqLen)
+            }
+
+            let cosResult = cosCached![0 ..< seqLen].asType(x.dtype)
+            let sinResult = sinCached![0 ..< seqLen].asType(x.dtype)
+
+            return (cosResult, sinResult)
         }
     }
 

@@ -52,7 +52,7 @@ private enum Language {
         @ModuleInfo(key: "v_proj") var wv: Linear
         @ModuleInfo(key: "o_proj") var wo: Linear
 
-        @ModuleInfo(key: "rotary_emb") var rotaryEmbedding: RoPE
+        @ModuleInfo(key: "rotary_emb") var rotaryEmbedding: QwenVL.Qwen2RotaryEmbedding
 
         public init(_ args: Qwen25VLConfiguration.TextConfiguration) {
             let dim = args.hiddenSize
@@ -67,26 +67,29 @@ private enum Language {
             self._wo.wrappedValue = Linear(heads * headDim, dim, bias: false)
 
             if let v = args.ropeScaling?["mrope_section"], let array = v.asInts() {
-                // mrope_section = np.cumsum(mrope_section * 2)[:-1].tolist()
-                self.mropeSection = sequence(state: (0, array.makeIterator())) { state in
-                    if let v = state.1.next() {
-                        // note the *2
-                        state.0 += v * 2
-                        return state.0
-                    } else {
-                        return nil
-                    }
-                }.dropLast()
+                // Python: mrope_section = np.cumsum(mrope_section * 2)[:-1].tolist()
+                let doubled = array.map { $0 * 2 }
+                var cumsum = [Int]()
+                var running = 0
+                for val in doubled {
+                    running += val
+                    cumsum.append(running)
+                }
+                // Remove the last element [:-1]
+                self.mropeSection = Array(cumsum.dropLast())
             } else {
                 fatalError("rope_scaling['mrope_section'] must be an array of integers")
             }
 
-            self._rotaryEmbedding.wrappedValue = RoPE(
-                dimensions: headDim, traditional: args.ropeTraditional, base: args.ropeTheta)
+            self._rotaryEmbedding.wrappedValue = QwenVL.Qwen2RotaryEmbedding(
+                dimensions: headDim,
+                maxPositionEmbeddings: args.maxPositionEmbeddings,
+                base: args.ropeTheta)
         }
 
         public func callAsFunction(
-            _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache?
+            _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
+            positionIds: MLXArray? = nil
         ) -> MLXArray {
             let (B, L) = (x.dim(0), x.dim(1))
 
@@ -94,23 +97,45 @@ private enum Language {
             var keys = wk(x)
             var values = wv(x)
 
-            // prepare the queries, keys and values for the attention computation
+            // Prepare the queries, keys and values for the attention computation
             queries = queries.reshaped(B, L, heads, headDim).transposed(0, 2, 1, 3)
             keys = keys.reshaped(B, L, kvHeads, headDim).transposed(0, 2, 1, 3)
             values = values.reshaped(B, L, kvHeads, headDim).transposed(0, 2, 1, 3)
 
-            let offset = cache?.offset ?? 0
-            let mask = mask?[0..., 0 ..< keys.dim(-2)]
+            var kvSeqLen = keys.dim(-2)
+            var computedPositionIds: MLXArray
 
-            queries = rotaryEmbedding(queries, offset: offset)
-            keys = rotaryEmbedding(keys, offset: offset)
+            if let positionIds {
+                kvSeqLen += (cache?.offset ?? 0) + 1
+                computedPositionIds = positionIds
+            } else {
+                let offset = cache?.offset ?? 0
+                kvSeqLen += offset + 1
+                computedPositionIds = MLXArray(offset ..< (offset + L))
+                computedPositionIds = expandedDimensions(computedPositionIds, axis: 0)
+                computedPositionIds = tiled(computedPositionIds, repetitions: [3, 1, 1])
+            }
 
-            if let cache {
+            let (cos, sin) = rotaryEmbedding(values, seqLen: kvSeqLen)
+
+            // Ensure mask has correct dtype and shape
+            var processedMask = mask?[0..., 0 ..< keys.dim(-2)]
+            if let mask = processedMask, mask.dtype != queries.dtype {
+                processedMask = mask.asType(queries.dtype)
+            }
+
+            // Apply multimodal rotary position embedding
+            (queries, keys) = Language.applyMultimodalRotaryPositionEmbedding(
+                q: queries, k: keys, cos: cos, sin: sin,
+                positionIds: computedPositionIds, mropeSection: mropeSection
+            )
+
+            if let cache = cache {
                 (keys, values) = cache.update(keys: keys, values: values)
             }
 
             let output = MLXFast.scaledDotProductAttention(
-                queries: queries, keys: keys, values: values, scale: scale, mask: mask
+                queries: queries, keys: keys, values: values, scale: scale, mask: processedMask
             )
             .transposed(0, 2, 1, 3)
             .reshaped(B, L, -1)
@@ -153,9 +178,10 @@ private enum Language {
         }
 
         public func callAsFunction(
-            _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache?
+            _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
+            positionIds: MLXArray? = nil
         ) -> MLXArray {
-            var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
+            var r = attention(inputLayerNorm(x), mask: mask, cache: cache, positionIds: positionIds)
             let h = x + r
             r = mlp(postAttentionLayerNorm(h))
             let out = h + r
@@ -184,12 +210,15 @@ private enum Language {
         }
 
         public func callAsFunction(
-            _ inputs: MLXArray?, cache: [KVCache]? = nil, inputEmbedding: MLXArray? = nil
+            _ inputs: MLXArray?,
+            cache: [KVCache]? = nil,
+            inputEmbedding: MLXArray? = nil,
+            positionIds: MLXArray? = nil
         ) -> MLXArray {
             var h: MLXArray
-            if let inputEmbedding {
+            if let inputEmbedding = inputEmbedding {
                 h = inputEmbedding
-            } else if let inputs {
+            } else if let inputs = inputs {
                 h = embedTokens(inputs)
             } else {
                 fatalError("one of inputs or inputEmbedding must be non-nil")
@@ -198,7 +227,7 @@ private enum Language {
             let mask: MLXArray? = createAttentionMask(h: h, cache: cache)
 
             for (i, layer) in layers.enumerated() {
-                h = layer(h, mask: mask, cache: cache?[i])
+                h = layer(h, mask: mask, cache: cache?[i], positionIds: positionIds)
             }
 
             return norm(h)
@@ -210,8 +239,16 @@ private enum Language {
         @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
         var kvHeads: [Int]
+        private var ropeDeltas: MLXArray?
 
-        public init(_ args: Qwen25VLConfiguration.TextConfiguration) {
+        // Store the needed config values
+        private let spatialMergeSize: Int
+        private let imageTokenId: Int
+        private let videoTokenId: Int
+        private let visionStartTokenId: Int
+
+        public init(_ args: Qwen25VLConfiguration.TextConfiguration, config: Qwen25VLConfiguration)
+        {
             self.model = Qwen25Model(args)
 
             if !args.tieWordEmbeddings {
@@ -219,18 +256,324 @@ private enum Language {
             }
 
             self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
+
+            // Store the config values we need
+            self.spatialMergeSize = config.visionConfiguration.spatialMergeSize
+            self.imageTokenId = config.baseConfiguration.imageTokenId
+            self.videoTokenId = config.baseConfiguration.videoTokenId
+            self.visionStartTokenId = config.baseConfiguration.visionStartTokenId
+        }
+
+        private func getRopeIndex(
+            inputIds: MLXArray,
+            imageGridThw: [THW]?,
+            videoGridThw: [THW]?,
+            attentionMask: MLXArray? = nil
+        ) -> (MLXArray, MLXArray) {
+            let batchSize = inputIds.dim(0)
+            let seqLength = inputIds.dim(1)
+
+            // Default position IDs
+            var positionIds = MLXArray(0 ..< seqLength)
+            positionIds = broadcast(positionIds[.newAxis, 0...], to: [batchSize, seqLength])
+
+            var mropePositionDeltas = [Int]()
+
+            let hasImages = imageGridThw?.isEmpty == false
+            let hasVideos = videoGridThw?.isEmpty == false
+
+            if hasImages || hasVideos {
+                // Create 3D position IDs for multimodal content
+                positionIds = ones([3, batchSize, seqLength]).asType(inputIds.dtype)
+
+                var imageIndex = 0
+                var videoIndex = 0
+
+                for batchIdx in 0 ..< batchSize {
+                    let inputIdsForBatch = inputIds[batchIdx]
+
+                    // Count image and video tokens
+                    let imageCount = sum(inputIdsForBatch .== imageTokenId).item(Int.self)
+                    let videoCount = sum(inputIdsForBatch .== videoTokenId).item(Int.self)
+
+                    var llmPosIdsList = [MLXArray]()
+                    var start = 0
+                    var remainingImages = imageCount
+                    var remainingVideos = videoCount
+
+                    // Process each image/video token
+                    for _ in 0 ..< (imageCount + videoCount) {
+                        // Find next image or video token position
+                        let inputTokens = inputIdsForBatch.asArray(Int.self)
+
+                        var edImage = inputTokens.count + 1
+                        var edVideo = inputTokens.count + 1
+
+                        if remainingImages > 0 {
+                            if let relativePos = inputTokens[start...].firstIndex(of: imageTokenId)
+                            {
+                                edImage = relativePos  // firstIndex already returns absolute index
+                            }
+                        }
+                        if remainingVideos > 0 {
+                            if let relativePos = inputTokens[start...].firstIndex(of: videoTokenId)
+                            {
+                                edVideo = relativePos  // firstIndex already returns absolute index
+                            }
+                        }
+
+                        let (t, h, w): (Int, Int, Int)
+                        let ed: Int
+
+                        if edImage < edVideo {
+                            // Use image frame - make sure we have images and valid index
+                            guard let imageGridThw = imageGridThw, imageIndex < imageGridThw.count
+                            else {
+                                break
+                            }
+                            let frame = imageGridThw[imageIndex]
+                            (t, h, w) = frame.values
+                            imageIndex += 1
+                            remainingImages -= 1
+                            ed = edImage
+                        } else {
+                            // Use video frame - make sure we have videos and valid index
+                            guard let videoGridThw = videoGridThw, videoIndex < videoGridThw.count
+                            else {
+                                break
+                            }
+                            let frame = videoGridThw[videoIndex]
+                            (t, h, w) = frame.values
+                            videoIndex += 1
+                            remainingVideos -= 1
+                            ed = edVideo
+                        }
+
+                        let llmGridT = t
+                        let llmGridH = h / spatialMergeSize
+                        let llmGridW = w / spatialMergeSize
+
+                        // Text tokens before this token
+                        let textLen = ed - start
+                        if textLen > 0 {
+                            let stIdx =
+                                llmPosIdsList.isEmpty
+                                ? 0 : (llmPosIdsList.last!.max() + 1).item(Int.self)
+                            let textIndices = broadcast(
+                                (MLXArray(0 ..< textLen) + stIdx)[.newAxis, 0...],
+                                to: [3, textLen]
+                            )
+                            llmPosIdsList.append(textIndices)
+                        }
+
+                        // Vision tokens
+                        let stIdx =
+                            llmPosIdsList.isEmpty
+                            ? 0 : (llmPosIdsList.last!.max() + 1).item(Int.self)
+
+                        let tIndex = broadcast(
+                            MLXArray(0 ..< llmGridT)[0..., .newAxis],
+                            to: [llmGridT, llmGridH * llmGridW]
+                        ).flattened()
+
+                        let hIndex = broadcast(
+                            MLXArray(0 ..< llmGridH)[.newAxis, 0..., .newAxis],
+                            to: [llmGridT, llmGridH, llmGridW]
+                        ).flattened()
+
+                        let wIndex = broadcast(
+                            MLXArray(0 ..< llmGridW)[.newAxis, .newAxis, 0...],
+                            to: [llmGridT, llmGridH, llmGridW]
+                        ).flattened()
+
+                        let visionIndices =
+                            stacked([tIndex, hIndex, wIndex], axis: 0) + MLXArray(textLen + stIdx)
+                        llmPosIdsList.append(visionIndices)
+
+                        start = ed + llmGridT * llmGridH * llmGridW
+                    }
+
+                    // Remaining text tokens
+                    if start < seqLength {
+                        let remainingLen = seqLength - start
+                        let stIdx =
+                            llmPosIdsList.isEmpty
+                            ? 0 : (llmPosIdsList.last!.max() + 1).item(Int.self)
+                        let remainingIndices = broadcast(
+                            (MLXArray(0 ..< remainingLen) + stIdx)[.newAxis, 0...],
+                            to: [3, remainingLen]
+                        )
+                        llmPosIdsList.append(remainingIndices)
+                    }
+
+                    // Concatenate all position IDs for this batch
+                    if !llmPosIdsList.isEmpty {
+                        let llmPositions = concatenated(llmPosIdsList, axis: 1)
+
+                        // Validate shape match before assignment
+                        if llmPositions.dim(1) != seqLength {
+                            print(
+                                "Warning: Position ID length mismatch. Expected: \(seqLength), got: \(llmPositions.dim(1))"
+                            )
+                            // Pad or truncate to match expected length
+                            if llmPositions.dim(1) < seqLength {
+                                let padWidth = seqLength - llmPositions.dim(1)
+                                let lastPos = llmPositions[0..., -1].max() + 1
+                                let padding = broadcast(
+                                    (MLXArray(0 ..< padWidth) + lastPos)[.newAxis, 0...],
+                                    to: [3, padWidth]
+                                )
+                                let paddedPositions = concatenated(
+                                    [llmPositions, padding], axis: 1)
+                                positionIds[0..., batchIdx, 0...] = paddedPositions
+                            } else {
+                                // Truncate if too long
+                                positionIds[0..., batchIdx, 0...] =
+                                    llmPositions[0..., 0 ..< seqLength]
+                            }
+                        } else {
+                            positionIds[0..., batchIdx, 0...] = llmPositions
+                        }
+
+                        mropePositionDeltas.append(
+                            (llmPositions[0..., 0 ..< min(llmPositions.dim(1), seqLength)].max() + 1
+                                - seqLength).item(Int.self))
+                    } else {
+                        mropePositionDeltas.append(0)
+                    }
+                }
+            } else {
+                // Handle text-only case or case with attention mask
+                if let attentionMask = attentionMask {
+                    // Python: position_ids = mx.cumsum(attention_mask.astype(mx.int64), axis=-1) - 1
+                    positionIds = cumsum(attentionMask.asType(.int64), axis: -1) - 1
+                    positionIds = `where`(
+                        attentionMask .== 0,
+                        ones(like: positionIds),
+                        positionIds
+                    )
+                    positionIds = expandedDimensions(positionIds[0], axis: 0)
+                    positionIds = tiled(positionIds, repetitions: [3, 1, 1])
+
+                    let maxPositionIds = positionIds.max(axis: 0, keepDims: false).max(
+                        axis: -1, keepDims: true)
+                    mropePositionDeltas = [
+                        (maxPositionIds + 1 - attentionMask.dim(-1)).item(Int.self)
+                    ]
+                } else {
+                    // Simple case - just sequential position IDs
+                    positionIds = MLXArray(0 ..< seqLength)[.newAxis, 0...]
+                    positionIds = broadcast(positionIds, to: [batchSize, seqLength])
+                    positionIds = broadcast(
+                        positionIds[.newAxis, 0..., 0...],
+                        to: [3, batchSize, seqLength]
+                    )
+                    mropePositionDeltas = Array(repeating: 0, count: batchSize)
+                }
+            }
+
+            let deltaArray = MLXArray(mropePositionDeltas.isEmpty ? [0] : mropePositionDeltas)
+            return (positionIds, deltaArray)
         }
 
         public func callAsFunction(
-            _ inputs: MLXArray?, cache: [KVCache]? = nil, inputEmbedding: MLXArray? = nil
+            _ inputs: MLXArray,  // Make this required, not optional
+            cache: [KVCache]? = nil,
+            inputEmbedding: MLXArray? = nil,
+            positionIds: MLXArray? = nil,
+            pixelValues: MLXArray? = nil,
+            imageGridThw: [THW]? = nil,
+            videoGridThw: [THW]? = nil
         ) -> LMOutput {
-            var out = model(inputs, cache: cache, inputEmbedding: inputEmbedding)
-            if let lmHead {
-                out = lmHead(out)
-            } else {
-                out = model.embedTokens.asLinear(out)
+            var computedPositionIds = positionIds
+
+            // Reset rope deltas when processing new image/video
+            if pixelValues != nil {
+                ropeDeltas = nil
             }
-            return LMOutput(logits: out)
+
+            // Calculate position IDs if not provided and mask conditions are met
+            if computedPositionIds == nil {
+                // Calculate RoPE index once per generation in the pre-fill stage only
+                let shouldCalculateRope =
+                    ((cache != nil && cache?[0].offset == 0) || ropeDeltas == nil || cache == nil)
+
+                if shouldCalculateRope {
+                    let (newPositionIds, newRopeDeltas) = getRopeIndex(
+                        inputIds: inputs,
+                        imageGridThw: imageGridThw,
+                        videoGridThw: videoGridThw
+                    )
+                    computedPositionIds = newPositionIds
+                    ropeDeltas = newRopeDeltas
+                } else {
+                    // Use pre-calculated rope deltas for generation continuation
+                    let batchSize = inputs.dim(0)
+                    let seqLength = inputs.dim(1)
+
+                    var delta = ropeDeltas ?? MLXArray([0])
+                    if let cache = cache {
+                        let cacheOffset = MLXArray([cache.last?.offset ?? 0])
+                        delta = delta + cacheOffset
+                    }
+
+                    // Create position IDs for this sequence
+                    var newPositionIds = broadcast(
+                        MLXArray(0 ..< seqLength)[.newAxis, 0...],
+                        to: [batchSize, seqLength]
+                    )
+
+                    // Add delta to each batch - ensure shapes are compatible
+                    if batchSize > 0 && delta.size > 0 {
+                        // Ensure delta has the right shape [batchSize]
+                        let deltaRepeated: MLXArray
+                        if delta.size == 1 {
+                            deltaRepeated = broadcast(delta, to: [batchSize])
+                        } else if delta.dim(0) != batchSize {
+                            deltaRepeated = broadcast(delta[0], to: [batchSize])
+                        } else {
+                            deltaRepeated = delta
+                        }
+
+                        newPositionIds = newPositionIds + deltaRepeated[0..., .newAxis]
+                    }
+
+                    // Broadcast to 3D for multimodal RoPE
+                    computedPositionIds = broadcast(
+                        newPositionIds[.newAxis, 0..., 0...],
+                        to: [3, batchSize, seqLength]
+                    )
+                }
+            }
+
+            // Get the embeddings
+            var h: MLXArray
+            if let inputEmbedding = inputEmbedding {
+                h = inputEmbedding
+            } else {
+                h = model.embedTokens(inputs)
+            }
+
+            // Create attention mask
+            let mask: MLXArray? = createAttentionMask(h: h, cache: cache)
+
+            // Process through transformer layers
+            for (i, layer) in model.layers.enumerated() {
+                h = layer(h, mask: mask, cache: cache?[i], positionIds: computedPositionIds)
+            }
+
+            // Apply final layer norm
+            h = model.norm(h)
+
+            // Apply output projection
+            if let lmHead = lmHead {
+                h = lmHead(h)
+            } else {
+                // Use tied embeddings
+                h = model.embedTokens.asLinear(h)
+            }
+
+            return LMOutput(logits: h)
         }
     }
 }
@@ -518,9 +861,13 @@ private enum Vision {
                 windowIndex.append(validValues + windowIndexId)
 
                 // Update cumulative sequence lengths
-                let cuSeqlensTmp =
-                    cumsum(seqlens, axis: 0) * spatialMergeUnit + cuWindowSeqlens.last!
-                cuWindowSeqlens.append(contentsOf: cuSeqlensTmp.asArray(Int.self))
+                var cuSeqlens = [Int]()
+                for frame in frames {
+                    let seqLen = frame.h * frame.w
+                    for _ in 0 ..< frame.t {
+                        cuSeqlens.append(seqLen)
+                    }
+                }
 
                 windowIndexId += gridT * llmGridH * llmGridW
             }
@@ -545,18 +892,30 @@ private enum Vision {
             return (combinedWindowIndex, uniqueCuWindowSeqlens)
         }
 
-        func attentionMask(sequenceLength: Int, cuSeqlens: MLXArray) -> MLXArray {
-            // Create attention mask
-            let attentionMask = full(
-                [1, sequenceLength, sequenceLength],
-                values: false)
+        func attentionMask(sequenceLength: Int, cuSeqlens: MLXArray, dtype: DType) -> MLXArray {
+            // Create attention mask filled with minimum values for the specific dtype
+            let minValue: Float
+            switch dtype {
+            case .float16:
+                minValue = -65504.0  // Minimum value for float16
+            case .float32:
+                minValue = -Float.greatestFiniteMagnitude
+            case .bfloat16:
+                minValue = -3.38953e38  // Approximate minimum for bfloat16
+            default:
+                minValue = -Float.greatestFiniteMagnitude
+            }
 
-            // Update mask for each sequence
+            var attentionMask = full(
+                [1, sequenceLength, sequenceLength], values: MLXArray(minValue)
+            ).asType(dtype)
+
+            // Update mask for each sequence (set to 0 for valid attention)
             let cuSeqlens = cuSeqlens.asArray(Int.self)
             for i in 1 ..< cuSeqlens.count {
                 let start = cuSeqlens[i - 1]
                 let end = cuSeqlens[i]
-                attentionMask[0..., start ..< end, start ..< end] = MLXArray(true)
+                attentionMask[0..., start ..< end, start ..< end] = MLXArray(0.0).asType(dtype)
             }
 
             return attentionMask
@@ -569,21 +928,28 @@ private enum Vision {
             // Get window indices and sequence lengths
             let (windowIndex, cuWindowSeqlens) = getWindowIndex(frames)
 
-            // prepare attention masks
-            let seqLen = hiddenStates.dim(0)
-            var cuSeqlens = [0]
+            var cuSeqlens = [Int]()
             for frame in frames {
                 let seqLen = frame.h * frame.w
-                cuSeqlens.append(
-                    contentsOf: Array(repeating: seqLen, count: frame.t).map {
-                        cuSeqlens.last! + $0
-                    })
+                for _ in 0 ..< frame.t {
+                    cuSeqlens.append(seqLen)
+                }
             }
-            let cuSeqlensArray = MLXArray(cuSeqlens)
 
-            let fullAttentionMask = attentionMask(sequenceLength: seqLen, cuSeqlens: cuSeqlensArray)
+            // Convert to cumulative sum and pad with 0 at beginning
+            var cumulativeSeqlens = [0]
+            var runningSum = 0
+            for seqLen in cuSeqlens {
+                runningSum += seqLen
+                cumulativeSeqlens.append(runningSum)
+            }
+            let cuSeqlensArray = MLXArray(cumulativeSeqlens)
+
+            let seqLen = hiddenStates.dim(0)
+            let fullAttentionMask = attentionMask(
+                sequenceLength: seqLen, cuSeqlens: cuSeqlensArray, dtype: hiddenStates.dtype)
             let windowAttentionMask = attentionMask(
-                sequenceLength: seqLen, cuSeqlens: cuWindowSeqlens)
+                sequenceLength: seqLen, cuSeqlens: cuWindowSeqlens, dtype: hiddenStates.dtype)
 
             // Reshape and reindex hidden states
             hiddenStates = hiddenStates.reshaped(seqLen / spatialMergeUnit, spatialMergeUnit, -1)
@@ -598,7 +964,6 @@ private enum Vision {
 
             // Process through blocks
             for (i, block) in blocks.enumerated() {
-                // Use full attention for specific blocks, window attention for others
                 let attentionMask =
                     fullattBlockIndexes.contains(i) ? fullAttentionMask : windowAttentionMask
 
@@ -814,7 +1179,8 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
     public init(_ config: Qwen25VLConfiguration) {
         self.config = config
         self._visionModel.wrappedValue = Vision.VisionModel(config.visionConfiguration)
-        self._languageModel.wrappedValue = Language.LanguageModel(config.textConfiguration)
+        self._languageModel.wrappedValue = Language.LanguageModel(
+            config.textConfiguration, config: config)  // Pass full config
     }
 
     private func inputEmbeddings(inputIds: MLXArray, pixelValues: MLXArray?, frames: [THW]?)
@@ -868,7 +1234,17 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             inputIds: input.text.tokens, pixelValues: allPixels,
             frames: allFrames.isEmpty ? nil : allFrames)
 
-        let result = languageModel(nil, cache: cache, inputEmbedding: inputEmbeddings)
+        // Pass BOTH the original input IDs AND the input embeddings
+        // The input IDs are needed for position calculation even when using embeddings
+        let result = languageModel(
+            input.text.tokens.squeezed(axis: 0),  // Remove batch dimension and pass original IDs
+            cache: cache,
+            inputEmbedding: inputEmbeddings,
+            positionIds: nil,
+            pixelValues: allPixels,
+            imageGridThw: input.image?.frames,
+            videoGridThw: input.video?.frames
+        )
 
         return .logits(result)
     }
@@ -954,8 +1330,8 @@ public struct Qwen25VLConfiguration: Codable, Sendable {
         public let outHiddenSize: Int
         public let numHeads: Int
         public let patchSize: Int
-        private let _inChans: Int?
-        public var inChannels: Int { _inChans ?? 3 }
+        private let _inChannels: Int?
+        public var inChannels: Int { _inChannels ?? 3 }
         private let _layerNormEps: Float?
         public var layerNormEps: Float { _layerNormEps ?? 1e-6 }
         public let spatialPatchSize: Int
@@ -963,11 +1339,14 @@ public struct Qwen25VLConfiguration: Codable, Sendable {
         public let temporalPatchSize: Int
         public let windowSize: Int
         public let fullattBlockIndexes: [Int]
-        public let tokensPerSecond: Int
-        private let _skipVision: Bool?
-        public var skipVision: Bool { _skipVision ?? false }
-        private let _hiddenAct: String?
-        public var hiddenAct: String { _hiddenAct ?? "silu" }
+        private let _tokensPerSecond: Int?
+        public var tokensPerSecond: Int { _tokensPerSecond ?? 2 }
+        private let _mlpRatio: Float?
+        public var mlpRatio: Float { _mlpRatio ?? 4.0 }
+        private let _imageSize: Int?
+        public var imageSize: Int { _imageSize ?? 384 }
+        private let _vocabularySize: Int?
+        public var vocabularySize: Int { _vocabularySize ?? 32000 }
 
         enum CodingKeys: String, CodingKey {
             case depth
@@ -976,16 +1355,17 @@ public struct Qwen25VLConfiguration: Codable, Sendable {
             case outHiddenSize = "out_hidden_size"
             case numHeads = "num_heads"
             case patchSize = "patch_size"
-            case _inChans = "in_chans"
-            case _layerNormEps = "layer_norm_eps"  // Added this line
+            case _inChannels = "in_channels"
+            case _layerNormEps = "layer_norm_eps"
             case spatialPatchSize = "spatial_patch_size"
             case spatialMergeSize = "spatial_merge_size"
             case temporalPatchSize = "temporal_patch_size"
             case windowSize = "window_size"
             case fullattBlockIndexes = "fullatt_block_indexes"
-            case tokensPerSecond = "tokens_per_second"
-            case _skipVision = "skip_vision"
-            case _hiddenAct = "hidden_act"
+            case _tokensPerSecond = "tokens_per_second"
+            case _mlpRatio = "mlp_ratio"
+            case _imageSize = "image_size"
+            case _vocabularySize = "vocab_size"
         }
     }
 
