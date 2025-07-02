@@ -312,13 +312,63 @@ public struct GemmaConfiguration: Codable, Sendable {
                                    //    • Layer outputs: [B, L, hidden_size]
                                    //    This uniform sizing enables residual connections (x + f(x))
                                    //    and seamless layer stacking throughout the transformer
-    var hiddenLayers: Int          // Number of transformer layers (e.g., 28) 
+    var hiddenLayers: Int          // Number of transformer layers (e.g., 28)
+                                   // Each layer refines the representation, building understanding progressively:
+                                   // • Early layers: basic patterns, syntax, word relationships
+                                   // • Middle layers: semantics, context, longer dependencies  
+                                   // • Late layers: complex reasoning, task-specific knowledge
+                                   // More layers = more sophisticated understanding, but also more computation
+                                   // Typical range: 6-12 for smaller models, 24-96+ for large models
+    
     var intermediateSize: Int      // MLP intermediate size (e.g., 8192) - usually 4x hidden_size
+                                   // The MLP expands hidden_size → intermediateSize → hidden_size
+                                   // Why expand? Creates a "thinking space" for complex computations:
+                                   // • Input: [B, L, 3072] → Gate/Up projections: [B, L, 8192] 
+                                   // • More neurons = more computational capacity for reasoning
+                                   // • 4x rule: empirically found to work well (balance of power vs efficiency)
+                                   // • After gated activation, Down projection: [B, L, 8192] → [B, L, 3072]
+    
     var attentionHeads: Int        // Number of attention heads (e.g., 24)
+                                   // Multi-head attention runs multiple "attention functions" in parallel
+                                   // Why multiple heads? Each head can focus on different relationships:
+                                   // • Head 1: syntactic dependencies ("the cat" → noun-determiner)
+                                   // • Head 2: semantic similarity ("king" ↔ "queen") 
+                                   // • Head 3: long-range context (pronoun → antecedent across sentences)
+                                   // • Head 4: positional patterns (sequence ordering)
+                                   // Total attention dimension = attentionHeads × headDimensions = hiddenSize
+    
     var headDimensions: Int        // Dimension per attention head (e.g., 128)
-    var rmsNormEps: Float         // Epsilon for numerical stability in normalization
+                                   // How we split the attention computation: hiddenSize = heads × headDim
+                                   // Example: 3072 = 24 heads × 128 dimensions per head
+                                   // Each head gets its own slice of the representation to work with
+                                   // Smaller headDim = more heads = more diverse attention patterns
+                                   // Larger headDim = fewer heads = more complex patterns per head
+                                   // Common values: 64, 80, 96, 128 (powers of 2 for efficient computation)
+    
+    var rmsNormEps: Float         // Epsilon for numerical stability in normalization (e.g., 1e-5)
+                                   // Prevents division by zero in RMSNorm: x / sqrt(mean(x²) + eps)
+                                   // Without eps: if all values in x are exactly 0, we'd divide by 0 → NaN
+                                   // Too large eps: normalization becomes less effective
+                                   // Too small eps: risk of numerical instability in float16/float32
+                                   // 1e-5 is empirically good balance for most cases
+    
     var vocabularySize: Int        // Size of token vocabulary (e.g., 256,000)
+                                   // How many unique "tokens" (words/subwords) the model knows
+                                   // Text preprocessing: "Hello world!" → [23421, 1085, 77] (token IDs)
+                                   // Larger vocab = more nuanced language understanding, but:
+                                   // • More parameters in embedding layer (vocab_size × hidden_size)
+                                   // • More computation in final language modeling head
+                                   // • Diminishing returns beyond ~100K for most languages
+                                   // Gemma uses SentencePiece tokenization with ~256K tokens
+    
     var kvHeads: Int              // Number of key-value heads (often < attention heads for efficiency)
+                                   // Modern optimization: "Grouped Query Attention" (GQA)
+                                   // Instead of: 24 query heads + 24 key heads + 24 value heads
+                                   // We use: 24 query heads + 8 key heads + 8 value heads (example)
+                                   // Each K/V head is shared across multiple Q heads (24÷8=3 queries per K/V)
+                                   // Benefits: ~3x less memory for KV cache, faster inference
+                                   // Trade-off: slight quality reduction vs major efficiency gain
+                                   // When kvHeads = attentionHeads: standard multi-head attention
     
     // RoPE (Rotary Position Encoding) parameters
     private let _ropeTheta: Float?      // Base frequency for position encoding
