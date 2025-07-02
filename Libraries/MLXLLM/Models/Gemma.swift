@@ -54,7 +54,14 @@ private class Attention: Module {
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
         // x shape: [batch_size, sequence_length, hidden_size]
-        let (B, L) = (x.dim(0), x.dim(1))  // B=batch size, L=sequence length
+        // 
+        // Input tensor breakdown:
+        // - B (Batch size): Number of sequences being processed in parallel (e.g., 4)
+        // - L (Sequence length): Number of tokens per sequence (e.g., 100) 
+        // - hidden_size: Features per token - the model's internal representation size (e.g., 3072)
+        //
+        // Example: [4, 100, 3072] = 4 sequences × 100 tokens × 3072 features per token
+        let (B, L) = (x.dim(0), x.dim(1))  // Extract batch size and sequence length
 
         // Project input to queries, keys, and values
         // Each projection transforms [B, L, hidden_size] → [B, L, n_heads * head_dim]
@@ -64,7 +71,16 @@ private class Attention: Module {
 
         // Reshape for multi-head attention: split the head dimension and move heads to dim 1
         // [B, L, n_heads * head_dim] → [B, n_heads, L, head_dim]
-        // This allows us to compute all heads in parallel
+        // 
+        // Why this reshape? Multi-head attention runs multiple "attention heads" in parallel.
+        // Each head looks for different types of relationships (syntax, semantics, etc.)
+        // 
+        // Before: [B, L, n_heads * head_dim] - all head info mixed together
+        // After:  [B, n_heads, L, head_dim] - each head gets its own slice
+        // 
+        // Example: [4, 100, 3072] → [4, 24, 100, 128] 
+        // (24 heads × 128 dims = 3072 total, but now each head is separate)
+        // This allows us to compute all heads in parallel efficiently
         queries = queries.reshaped(B, L, nHeads, -1).transposed(0, 2, 1, 3)
         keys = keys.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
@@ -201,8 +217,17 @@ private class GemmaModelInner: Module {
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         // inputs: [batch_size, sequence_length] - token IDs
+        // 
+        // Input shape: [B, L] where:
+        // - B (Batch size): How many text sequences we're processing simultaneously
+        // - L (Sequence length): How many tokens (words/subwords) in each sequence
+        // 
+        // Each element is an integer token ID (e.g., token 5234 might represent "hello")
+        // Example: [4, 100] means 4 sentences, each with 100 tokens
         
         // 1. Convert token IDs to embeddings: [B, L] → [B, L, hidden_size]
+        // This transforms sparse integer IDs into dense vector representations
+        // Each token ID gets mapped to a learned vector of hidden_size dimensions
         var h = embedTokens(inputs)
         
         // 2. Scale embeddings by sqrt(hidden_size) - common in transformer architectures
@@ -241,6 +266,15 @@ public class GemmaModel: Module, LLMModel, KVCacheDimensionProvider {
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         // 1. Get hidden states from the transformer: [B, L, hidden_size]
+        // 
+        // Tensor shape breakdown:
+        // - B (Batch size): How many sequences we're processing at once (e.g., 4 sentences)
+        // - L (Sequence length): How many tokens in each sequence (e.g., 100 words per sentence)  
+        // - hidden_size: The model's internal representation size (e.g., 3072 features per token)
+        //
+        // Example: [4, 100, 3072] means we're processing 4 sentences of 100 tokens each,
+        // where each token is represented as a 3072-dimensional vector containing the
+        // model's learned understanding of that token in context
         let out = model(inputs, cache: cache)
         
         // 2. Language modeling head: convert hidden states to vocabulary logits
@@ -248,6 +282,15 @@ public class GemmaModel: Module, LLMModel, KVCacheDimensionProvider {
         // This reduces parameters and often improves performance
         return model.embedTokens.asLinear(out)  // [B, L, hidden_size] → [B, L, vocab_size]
         
+        // Final output shape: [B, L, vocab_size]
+        // - B: Same batch size as input
+        // - L: Same sequence length as input  
+        // - vocab_size: Probability distribution over all possible next tokens (e.g., 256,000 tokens)
+        //
+        // Example: [4, 100, 256000] means for each of the 4 sentences, for each of the 100 positions,
+        // we have a 256,000-dimensional vector where each element is the model's confidence score
+        // for that specific token being the next word. Higher scores = more likely next token.
+        //
         // The output logits represent the model's prediction for the next token
         // Higher logits = higher probability for that token
     }
@@ -262,6 +305,13 @@ public struct GemmaConfiguration: Codable, Sendable {
     // Model architecture hyperparameters
     var modelType: String           // e.g., "gemma"
     var hiddenSize: Int            // Main hidden dimension (e.g., 3072)
+                                   // ⚠️  KEY DESIGN PRINCIPLE: This is the size of ALL hidden representations:
+                                   //    • Token embeddings: [vocab_size] → [hidden_size]
+                                   //    • Attention outputs: [B, L, hidden_size] 
+                                   //    • MLP outputs: [B, L, hidden_size]
+                                   //    • Layer outputs: [B, L, hidden_size]
+                                   //    This uniform sizing enables residual connections (x + f(x))
+                                   //    and seamless layer stacking throughout the transformer
     var hiddenLayers: Int          // Number of transformer layers (e.g., 28) 
     var intermediateSize: Int      // MLP intermediate size (e.g., 8192) - usually 4x hidden_size
     var attentionHeads: Int        // Number of attention heads (e.g., 24)
