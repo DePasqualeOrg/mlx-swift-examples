@@ -8,25 +8,6 @@ import Tokenizers
 
 // Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/gemma.py
 
-// Specialized norm for Gemma
-private class RMSNorm: Module, UnaryLayer {
-    let weight: MLXArray  // Learnable scaling parameters for each feature dimension
-    let eps: Float       // Small constant to prevent division by zero
-
-    public init(dimensions: Int, eps: Float = 1e-5) {
-        // Initialize weights as ones - these will be learned during training
-        self.weight = MLXArray.ones([dimensions])
-        self.eps = eps
-    }
-
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // RMSNorm: normalizes based on root mean square, simpler than LayerNorm
-        // Formula: x / sqrt(mean(x²) + eps) * (1 + weight)
-        // This keeps activations in a stable range as they flow through layers
-        return MLXFast.rmsNorm(x, weight: 1.0 + self.weight, eps: self.eps)
-    }
-}
-
 private class Attention: Module {
     let args: GemmaConfiguration
     let nHeads: Int      // Number of attention heads (parallel attention computations)
