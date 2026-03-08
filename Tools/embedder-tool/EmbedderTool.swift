@@ -5,7 +5,6 @@ import ArgumentParser
 import Foundation
 import MLX
 import MLXEmbedders
-import Tokenizers
 
 @main
 struct EmbedderTool: AsyncParsableCommand {

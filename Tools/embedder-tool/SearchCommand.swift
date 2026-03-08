@@ -5,7 +5,6 @@ import ArgumentParser
 import Foundation
 import MLX
 import MLXEmbedders
-import Tokenizers
 
 struct SearchCommand: EmbedderCommand {
     static let configuration = CommandConfiguration(

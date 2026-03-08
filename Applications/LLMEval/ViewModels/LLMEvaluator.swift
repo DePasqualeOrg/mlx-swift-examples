@@ -115,31 +115,9 @@ class LLMEvaluator {
                 }
             }
 
-            // Verify the download succeeded by checking for model files
-            let fileManager = FileManager.default
-            let directoryExists = fileManager.fileExists(atPath: modelDirectory.path)
-            let contents = (try? fileManager.contentsOfDirectory(atPath: modelDirectory.path)) ?? []
-            let hasSafetensors = contents.contains { $0.hasSuffix(".safetensors") }
-
-            if !directoryExists || !hasSafetensors {
-                throw NSError(
-                    domain: "LLMEvaluator",
-                    code: -1,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "Model download failed. Please check your network connection and try again."
-                    ]
-                )
-            }
-
             modelInfo = "Loading \(modelName)..."
             downloadProgress = nil
             totalSize = nil
-
-            let modelContainer = try await LLMModelFactory.shared.loadContainer(
-                hub: hub,
-                configuration: modelConfiguration
-            ) { _ in }
 
             let numParams = await modelContainer.perform { $0.model.numParameters() }
 

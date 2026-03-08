@@ -1,7 +1,7 @@
 import Foundation
 import MLX
 import MLXEmbedders
-import Tokenizers
+import MLXLMCommon
 
 public struct RuntimeEmbeddingResult {
     public let embeddings: [(index: Int, vector: [Float])]

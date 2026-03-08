@@ -5,7 +5,6 @@ import MLXLLM
 import MLXLMCommon
 import Metal
 import SwiftUI
-import Tokenizers
 
 struct ContentView: View {
     @Environment(DeviceStat.self) private var deviceStat
