@@ -3,8 +3,8 @@
 import ArgumentParser
 import Foundation
 import MLXEmbedders
-import MLXEmbeddersTokenizers
-import MLXEmbeddersHFAPI
+import MLXEmbeddersHuggingFace
+import MLXEmbeddersTransformers
 
 struct ModelArguments: ParsableArguments {
 

@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import HFAPI
+import HuggingFace
 import MLX
 import MLXNN
 
@@ -398,11 +398,14 @@ func loadWeights(
 func resolve(hub: HubClient, configuration: StableDiffusionConfiguration, key: FileKey) throws -> URL {
     precondition(
         configuration.files[key] != nil, "configuration \(configuration.id) missing key: \(key)")
-    guard let directory = hub.cache.snapshotPath(
-        repo: try configuration.repoID,
-        kind: .model,
-        revision: "main"
-    ) else {
+    let repo = try configuration.repoID
+    guard let cache = hub.cache,
+        let revision = cache.resolveRevision(repo: repo, kind: .model, ref: "main")
+    else {
+        throw StableDiffusionConfiguration.Error.missingDownloadedSnapshot(configuration.id)
+    }
+    let directory = try cache.snapshotPath(repo: repo, kind: .model, commitHash: revision)
+    guard FileManager.default.fileExists(atPath: directory.path) else {
         throw StableDiffusionConfiguration.Error.missingDownloadedSnapshot(configuration.id)
     }
     return directory.appending(component: configuration.files[key]!)

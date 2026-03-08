@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import HFAPI
+import HuggingFace
 import MLX
 import MLXNN
 

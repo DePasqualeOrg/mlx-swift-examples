@@ -4,10 +4,10 @@ import ArgumentParser
 import CoreImage
 import Foundation
 import MLX
-import MLXLMHFAPI
+import MLXLMHuggingFace
 import MLXLLM
 import MLXLMCommon
-import MLXLMTokenizers
+import MLXLMTransformers
 import MLXVLM
 
 @main

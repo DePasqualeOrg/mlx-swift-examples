@@ -3,7 +3,7 @@
 import ArgumentParser
 import Foundation
 import MLX
-import MLXLMHFAPI
+import MLXLMHuggingFace
 import MLXLLM
 import MLXLMCommon
 import MLXNN
@@ -192,11 +192,14 @@ struct LoRAFuseCommand: AsyncParsableCommand {
                     "Invalid Hugging Face repository ID '\(output)'. Expected format 'namespace/name'."
                 )
             }
+            guard let cache = hub.cache else {
+                throw ValidationError("Hub output requires a HubClient with cache enabled.")
+            }
             let revision = "local-fused"
-            outputURL = hub.cache.snapshotsDirectory(repo: repo, kind: .model)
+            outputURL = cache.snapshotsDirectory(repo: repo, kind: .model)
                 .appending(component: revision)
             finalizeOutput = {
-                try hub.cache.updateRef(repo: repo, kind: .model, ref: "main", commit: revision)
+                try cache.updateRef(repo: repo, kind: .model, ref: "main", commit: revision)
             }
         }
 

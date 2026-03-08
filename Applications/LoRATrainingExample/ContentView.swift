@@ -1,10 +1,10 @@
 // Copyright © 2024 Apple Inc.
 
 import MLX
-import MLXLMHFAPI
+import MLXLMHuggingFace
 import MLXLLM
 import MLXLMCommon
-import MLXLMTokenizers
+import MLXLMTransformers
 import MLXNN
 import MLXOptimizers
 import SwiftUI

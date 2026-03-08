@@ -7,10 +7,10 @@
 
 import Foundation
 import MLX
-import MLXLMHFAPI
+import MLXLMHuggingFace
 import MLXLLM
 import MLXLMCommon
-import MLXLMTokenizers
+import MLXLMTransformers
 import MLXVLM
 
 /// A service class that manages machine learning models for text and vision-language tasks.

@@ -1,9 +1,9 @@
 // Copyright © 2025 Apple Inc.
 
-import MLXLMHFAPI
+import MLXLMHuggingFace
 import MLXLLM
 import MLXLMCommon
-import MLXLMTokenizers
+import MLXLMTransformers
 import SwiftUI
 
 /// which model to load
