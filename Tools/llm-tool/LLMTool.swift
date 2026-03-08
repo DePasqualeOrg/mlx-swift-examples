@@ -3,12 +3,12 @@
 import ArgumentParser
 import CoreImage
 import Foundation
-import Hub
 import MLX
+import MLXLMHFAPI
 import MLXLLM
 import MLXLMCommon
+import MLXLMTokenizers
 import MLXVLM
-import Tokenizers
 
 @main
 struct LLMTool: AsyncParsableCommand {
@@ -46,14 +46,18 @@ struct ModelArguments: ParsableArguments, Sendable {
             modelConfiguration = modelFactory.configuration(id: modelName)
         }
 
-        let hub =
-            if let download {
-                HubApi(downloadBase: download)
-            } else {
-                HubApi()
-            }
+        return try await modelFactory.loadContainer(
+            from: makeHubClient(),
+            configuration: modelConfiguration
+        )
+    }
 
-        return try await modelFactory.loadContainer(hub: hub, configuration: modelConfiguration)
+    func makeHubClient() -> HubClient {
+        if let download {
+            return HubClient(cache: HubCache(cacheDirectory: download.standardizedFileURL))
+        }
+
+        return .default
     }
 }
 

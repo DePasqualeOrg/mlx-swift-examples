@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
+import HFAPI
 import MLX
 import MLXNN
 
@@ -214,7 +214,7 @@ open class StableDiffusion {
     let tokenizer: CLIPTokenizer
 
     internal init(
-        hub: HubApi, configuration: StableDiffusionConfiguration, dType: DType,
+        hub: HubClient, configuration: StableDiffusionConfiguration, dType: DType,
         diffusionConfiguration: DiffusionConfiguration? = nil, unet: UNetModel? = nil,
         textEncoder: CLIPTextModel? = nil, autoencoder: Autoencoder? = nil,
         sampler: SimpleEulerSampler? = nil, tokenizer: CLIPTokenizer? = nil
@@ -299,7 +299,7 @@ open class StableDiffusion {
 /// Implementation of ``StableDiffusion`` for the `stabilityai/stable-diffusion-2-1-base` model.
 open class StableDiffusionBase: StableDiffusion, TextToImageGenerator {
 
-    public init(hub: HubApi, configuration: StableDiffusionConfiguration, dType: DType) throws {
+    public init(hub: HubClient, configuration: StableDiffusionConfiguration, dType: DType) throws {
         try super.init(hub: hub, configuration: configuration, dType: dType)
     }
 
@@ -345,7 +345,7 @@ open class StableDiffusionXL: StableDiffusion, TextToImageGenerator, ImageToImag
     let textEncoder2: CLIPTextModel
     let tokenizer2: CLIPTokenizer
 
-    public init(hub: HubApi, configuration: StableDiffusionConfiguration, dType: DType) throws {
+    public init(hub: HubClient, configuration: StableDiffusionConfiguration, dType: DType) throws {
         let diffusionConfiguration = try loadConfiguration(
             hub: hub, configuration: configuration, key: .diffusionConfig,
             type: DiffusionConfiguration.self)

@@ -20,7 +20,7 @@ index \
     --recursive
 ```
 
-Then press <kbd>⌘</kbd>+<kbd>R</kbd> to run. The first launch may prompt for access to the Documents directory so the Hugging Face `HubApi` can download model assets.
+Then press <kbd>⌘</kbd>+<kbd>R</kbd> to run. By default, model downloads use the standard Hugging Face cache location. Pass `--download` to store assets in a different directory.
 
 ### Running: Command Line
 

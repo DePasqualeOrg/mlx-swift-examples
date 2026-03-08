@@ -17,7 +17,7 @@ struct ListCommand: AsyncParsableCommand {
 
         for configuration in models {
             switch configuration.id {
-            case .id(let identifier):
+            case .id(let identifier, _):
                 print(identifier)
             case .directory(let url):
                 if includeDirectories {

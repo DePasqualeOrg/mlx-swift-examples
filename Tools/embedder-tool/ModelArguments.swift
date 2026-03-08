@@ -2,8 +2,9 @@
 
 import ArgumentParser
 import Foundation
-import Hub
 import MLXEmbedders
+import MLXEmbeddersTokenizers
+import MLXEmbeddersHFAPI
 
 struct ModelArguments: ParsableArguments {
 
@@ -16,7 +17,9 @@ struct ModelArguments: ParsableArguments {
     var download: URL?
 
     @MainActor
-    func configuration(default defaultConfiguration: ModelConfiguration) -> ModelConfiguration {
+    func configuration(
+        default defaultConfiguration: ModelConfiguration
+    ) -> ModelConfiguration {
         guard let model else {
             return defaultConfiguration
         }
@@ -40,15 +43,16 @@ struct LoadedEmbedderModel {
 
 extension ModelArguments {
 
-    func load(default defaultConfiguration: ModelConfiguration) async throws -> LoadedEmbedderModel
+    func load(default defaultConfiguration: ModelConfiguration) async throws
+        -> LoadedEmbedderModel
     {
         let configuration = await configuration(default: defaultConfiguration)
-        let hub = makeHub()
+        let hub = makeHubClient()
 
         print("Loading model \(configuration.name)...")
 
-        let container = try await MLXEmbedders.loadModelContainer(
-            hub: hub,
+        let container = try await loadModelContainer(
+            from: hub,
             configuration: configuration,
             progressHandler: { progress in
                 let percentage = Int(progress.fractionCompleted * 100)
@@ -63,12 +67,12 @@ extension ModelArguments {
         return LoadedEmbedderModel(configuration: configuration, container: container)
     }
 
-    private func makeHub() -> HubApi {
+    private func makeHubClient() -> HubClient {
         if let downloadURL {
-            return HubApi(downloadBase: downloadURL)
+            return HubClient(cache: HubCache(cacheDirectory: downloadURL))
         }
 
-        return HubApi()
+        return .default
     }
 }
 

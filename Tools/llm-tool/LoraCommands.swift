@@ -2,13 +2,12 @@
 
 import ArgumentParser
 import Foundation
-import Hub
 import MLX
+import MLXLMHFAPI
 import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MLXOptimizers
-import Tokenizers
 
 struct LoRACommand: AsyncParsableCommand {
 
@@ -181,12 +180,24 @@ struct LoRAFuseCommand: AsyncParsableCommand {
 
     @MainActor
     mutating func run() async throws {
+        let hub = args.args.makeHubClient()
         let outputURL: URL
+        let finalizeOutput: () throws -> Void
         if output.hasPrefix("/") {
             outputURL = URL(filePath: output)
+            finalizeOutput = {}
         } else {
-            let repo = HubApi.Repo(id: output)
-            outputURL = HubApi().localRepoLocation(repo)
+            guard let repo = Repo.ID(rawValue: output) else {
+                throw ValidationError(
+                    "Invalid Hugging Face repository ID '\(output)'. Expected format 'namespace/name'."
+                )
+            }
+            let revision = "local-fused"
+            outputURL = hub.cache.snapshotsDirectory(repo: repo, kind: .model)
+                .appending(component: revision)
+            finalizeOutput = {
+                try hub.cache.updateRef(repo: repo, kind: .model, ref: "main", commit: revision)
+            }
         }
 
         let (modelContainer, modelAdapter) = try await args.load()
@@ -198,7 +209,7 @@ struct LoRAFuseCommand: AsyncParsableCommand {
 
         // make the new directory and copy files from source model
         try FileManager.default.createDirectory(at: outputURL, withIntermediateDirectories: true)
-        let inputURL = await modelContainer.configuration.modelDirectory()
+        let inputURL = try await modelContainer.modelDirectory
         let enumerator = FileManager.default.enumerator(
             at: inputURL, includingPropertiesForKeys: nil)!
         for url in enumerator.allObjects.compactMap({ $0 as? URL }) {
@@ -216,6 +227,8 @@ struct LoRAFuseCommand: AsyncParsableCommand {
             let weights = Dictionary(uniqueKeysWithValues: context.model.parameters().flattened())
             try save(arrays: weights, url: outputURL.appending(component: "weights.safetensors"))
         }
+
+        try finalizeOutput()
 
         print("Fused weights written to \(outputURL.path())")
         print("Use with:\n\tllm-tool eval --model \(output)")

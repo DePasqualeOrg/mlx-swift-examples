@@ -22,8 +22,9 @@ To run this in Xcode simply press cmd-opt-r to set the scheme arguments. For exa
 
 Then cmd-r to run.
 
-> Note: you may be prompted for access to your Documents directory -- this is where
-the Hugging Face HubApi stores the downloaded files.
+> Note: by default, downloads use the standard Hugging Face cache location
+> (`~/.cache/huggingface/hub` for non-sandboxed macOS tools). Use `--download`
+> to override the cache directory.
 
 The model should be a path in the Hugging Face repository, e.g.:
 

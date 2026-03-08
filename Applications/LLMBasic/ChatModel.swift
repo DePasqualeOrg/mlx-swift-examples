@@ -1,7 +1,9 @@
 // Copyright © 2025 Apple Inc.
 
+import MLXLMHFAPI
 import MLXLLM
 import MLXLMCommon
+import MLXLMTokenizers
 import SwiftUI
 
 /// which model to load
@@ -40,7 +42,10 @@ private let generateParameters = GenerateParameters(temperature: 0.5)
         case .idle:
             let task = Task {
                 // download and report progress
-                try await loadModelContainer(configuration: modelConfiguration) { value in
+                try await loadModelContainer(
+                    from: HubClient.default,
+                    configuration: modelConfiguration
+                ) { value in
                     Task { @MainActor in
                         self.progress = value.fractionCompleted
                     }

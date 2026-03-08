@@ -1,12 +1,13 @@
 // Copyright © 2024 Apple Inc.
 
 import MLX
+import MLXLMHFAPI
 import MLXLLM
 import MLXLMCommon
+import MLXLMTokenizers
 import MLXNN
 import MLXOptimizers
 import SwiftUI
-import Tokenizers
 
 struct ContentView: View {
 
@@ -142,6 +143,7 @@ class LoRAEvaluator {
             }
 
             let modelContainer = try await LLMModelFactory.shared.loadContainer(
+                from: HubClient.default,
                 configuration: modelConfiguration
             ) {
                 progress in
@@ -269,7 +271,7 @@ class LoRAEvaluator {
                 input: input, parameters: generateParameters, context: context
             ) { tokens in
                 if tokens.count % evaluateShowEvery == 0 {
-                    let fullOutput = context.tokenizer.decode(tokens: tokens)
+                    let fullOutput = context.tokenizer.decode(tokenIds: tokens)
                     Task { @MainActor in
                         self.output = fullOutput
                     }

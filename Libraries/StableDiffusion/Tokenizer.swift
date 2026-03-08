@@ -31,8 +31,8 @@ struct Bigram: Hashable {
 /// - https://github.com/ml-explore/mlx-examples/blob/main/stable_diffusion/stable_diffusion/tokenizer.py
 /// - https://github.com/huggingface/transformers/blob/main/src/transformers/models/clip/tokenization_clip.py
 ///
-/// Ideally this would be a tokenizer from `swift-transformers` but this is too special purpose to be representable in
-/// what exists there (at time of writing).
+/// Ideally this would use a shared tokenizer package, but this is too special purpose to be
+/// representable in current public APIs.
 class CLIPTokenizer {
 
     let pattern =

@@ -1,9 +1,10 @@
 // Copyright © 2025 Apple Inc.
 
-import Hub
 import MLX
+import MLXLMHFAPI
 import MLXLLM
 import MLXLMCommon
+import MLXLMTokenizers
 import Metal
 import SwiftUI
 
@@ -101,13 +102,11 @@ class LLMEvaluator {
 
         Memory.cacheLimit = 20 * 1024 * 1024
 
-        let hub = HubApi(
-            downloadBase: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        )
+        let hub = HubClient.default
 
         do {
-            let modelDirectory = try await downloadModel(
-                hub: hub,
+            let modelContainer = try await LLMModelFactory.shared.loadContainer(
+                from: hub,
                 configuration: modelConfiguration
             ) { [weak self] progress in
                 Task { @MainActor in

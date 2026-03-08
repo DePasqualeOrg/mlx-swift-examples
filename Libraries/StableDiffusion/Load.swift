@@ -1,7 +1,7 @@
 // Copyright © 2024 Apple Inc.
 
 import Foundation
-import Hub
+import HFAPI
 import MLX
 import MLXNN
 
@@ -112,24 +112,46 @@ public struct StableDiffusionConfiguration: Sendable {
     let files: [FileKey: String]
     public let defaultParameters: @Sendable () -> EvaluateParameters
     let factory:
-        @Sendable (HubApi, StableDiffusionConfiguration, LoadConfiguration) throws ->
+        @Sendable (HubClient, StableDiffusionConfiguration, LoadConfiguration) throws ->
             StableDiffusion
 
-    public func download(
-        hub: HubApi = HubApi(), progressHandler: @escaping (Progress) -> Void = { _ in }
-    ) async throws {
-        let repo = Hub.Repo(id: self.id)
-        try await hub.snapshot(
-            from: repo, matching: Array(files.values), progressHandler: progressHandler)
+    enum Error: LocalizedError {
+        case invalidRepositoryID(String)
+        case missingDownloadedSnapshot(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidRepositoryID(let id):
+                return "Invalid Hugging Face repository ID: '\(id)'."
+            case .missingDownloadedSnapshot(let id):
+                return "Model files for '\(id)' are not downloaded. Call download() first."
+            }
+        }
     }
 
-    public func textToImageGenerator(hub: HubApi = HubApi(), configuration: LoadConfiguration)
+    fileprivate var repoID: Repo.ID {
+        get throws {
+            guard let repoID = Repo.ID(rawValue: id) else {
+                throw Error.invalidRepositoryID(id)
+            }
+            return repoID
+        }
+    }
+
+    public func download(
+        hub: HubClient = .default, progressHandler: @escaping (Progress) -> Void = { _ in }
+    ) async throws {
+        _ = try await hub.downloadSnapshot(
+            of: repoID, matching: Array(files.values), progressHandler: progressHandler)
+    }
+
+    public func textToImageGenerator(hub: HubClient = .default, configuration: LoadConfiguration)
         throws -> TextToImageGenerator?
     {
         try factory(hub, self, configuration) as? TextToImageGenerator
     }
 
-    public func imageToImageGenerator(hub: HubApi = HubApi(), configuration: LoadConfiguration)
+    public func imageToImageGenerator(hub: HubClient = .default, configuration: LoadConfiguration)
         throws -> ImageToImageGenerator?
     {
         try factory(hub, self, configuration) as? ImageToImageGenerator
@@ -373,36 +395,41 @@ func loadWeights(
 
 // MARK: - Loading
 
-func resolve(hub: HubApi, configuration: StableDiffusionConfiguration, key: FileKey) -> URL {
+func resolve(hub: HubClient, configuration: StableDiffusionConfiguration, key: FileKey) throws -> URL {
     precondition(
         configuration.files[key] != nil, "configuration \(configuration.id) missing key: \(key)")
-    let repo = Hub.Repo(id: configuration.id)
-    let directory = hub.localRepoLocation(repo)
+    guard let directory = hub.cache.snapshotPath(
+        repo: try configuration.repoID,
+        kind: .model,
+        revision: "main"
+    ) else {
+        throw StableDiffusionConfiguration.Error.missingDownloadedSnapshot(configuration.id)
+    }
     return directory.appending(component: configuration.files[key]!)
 }
 
 func loadConfiguration<T: Decodable>(
-    hub: HubApi, configuration: StableDiffusionConfiguration, key: FileKey, type: T.Type
+    hub: HubClient, configuration: StableDiffusionConfiguration, key: FileKey, type: T.Type
 ) throws -> T {
-    let url = resolve(hub: hub, configuration: configuration, key: key)
+    let url = try resolve(hub: hub, configuration: configuration, key: key)
     return try JSONDecoder().decode(T.self, from: Data(contentsOf: url))
 }
 
-func loadUnet(hub: HubApi, configuration: StableDiffusionConfiguration, dType: DType) throws
+func loadUnet(hub: HubClient, configuration: StableDiffusionConfiguration, dType: DType) throws
     -> UNetModel
 {
     let unetConfiguration = try loadConfiguration(
         hub: hub, configuration: configuration, key: .unetConfig, type: UNetConfiguration.self)
     let model = UNetModel(configuration: unetConfiguration)
 
-    let weightsURL = resolve(hub: hub, configuration: configuration, key: .unetWeights)
+    let weightsURL = try resolve(hub: hub, configuration: configuration, key: .unetWeights)
     try loadWeights(url: weightsURL, model: model, mapper: unetRemap, dType: dType)
 
     return model
 }
 
 func loadTextEncoder(
-    hub: HubApi, configuration: StableDiffusionConfiguration,
+    hub: HubClient, configuration: StableDiffusionConfiguration,
     configKey: FileKey = .textEncoderConfig, weightsKey: FileKey = .textEncoderWeights, dType: DType
 ) throws -> CLIPTextModel {
     let clipConfiguration = try loadConfiguration(
@@ -410,13 +437,13 @@ func loadTextEncoder(
         type: CLIPTextModelConfiguration.self)
     let model = CLIPTextModel(configuration: clipConfiguration)
 
-    let weightsURL = resolve(hub: hub, configuration: configuration, key: weightsKey)
+    let weightsURL = try resolve(hub: hub, configuration: configuration, key: weightsKey)
     try loadWeights(url: weightsURL, model: model, mapper: clipRemap, dType: dType)
 
     return model
 }
 
-func loadAutoEncoder(hub: HubApi, configuration: StableDiffusionConfiguration, dType: DType) throws
+func loadAutoEncoder(hub: HubClient, configuration: StableDiffusionConfiguration, dType: DType) throws
     -> Autoencoder
 {
     let autoEncoderConfiguration = try loadConfiguration(
@@ -424,13 +451,13 @@ func loadAutoEncoder(hub: HubApi, configuration: StableDiffusionConfiguration, d
     )
     let model = Autoencoder(configuration: autoEncoderConfiguration)
 
-    let weightsURL = resolve(hub: hub, configuration: configuration, key: .vaeWeights)
+    let weightsURL = try resolve(hub: hub, configuration: configuration, key: .vaeWeights)
     try loadWeights(url: weightsURL, model: model, mapper: vaeRemap, dType: dType)
 
     return model
 }
 
-func loadDiffusionConfiguration(hub: HubApi, configuration: StableDiffusionConfiguration) throws
+func loadDiffusionConfiguration(hub: HubClient, configuration: StableDiffusionConfiguration) throws
     -> DiffusionConfiguration
 {
     try loadConfiguration(
@@ -441,11 +468,11 @@ func loadDiffusionConfiguration(hub: HubApi, configuration: StableDiffusionConfi
 // MARK: - Tokenizer
 
 func loadTokenizer(
-    hub: HubApi, configuration: StableDiffusionConfiguration,
+    hub: HubClient, configuration: StableDiffusionConfiguration,
     vocabulary: FileKey = .tokenizerVocabulary, merges: FileKey = .tokenizerMerges
 ) throws -> CLIPTokenizer {
-    let vocabularyURL = resolve(hub: hub, configuration: configuration, key: vocabulary)
-    let mergesURL = resolve(hub: hub, configuration: configuration, key: merges)
+    let vocabularyURL = try resolve(hub: hub, configuration: configuration, key: vocabulary)
+    let mergesURL = try resolve(hub: hub, configuration: configuration, key: merges)
 
     let vocabulary = try JSONDecoder().decode(
         [String: Int].self, from: Data(contentsOf: vocabularyURL))
